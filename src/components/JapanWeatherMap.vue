@@ -311,7 +311,7 @@ const renderMap = async () => {
       .attr('d', currentPathGenerator as any)
       .attr('fill', (d: any) => getPrefectureColor(d.properties.nam_ja))
       .attr('stroke', '#ffffff')
-      .attr('stroke-width', 1.2)
+      .attr('stroke-width', 0.2)
       .attr('cursor', 'pointer')
       .on('mousemove', function(event, d: any) {
         const prefName = d.properties.nam_ja;
