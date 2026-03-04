@@ -5,7 +5,7 @@
       <input
         v-model="searchQuery"
         type="text"
-        placeholder="輸入市區/町名 (例如: 大正區、天王寺)"
+        placeholder="輸入地區 (ex. 札幌市、天王寺)"
         class="w-full bg-transparent border-none outline-none py-2 text-slate-700 font-medium placeholder:text-slate-400 placeholder:text-sm sm:placeholder:text-base"
         @input="onInput"
         @keydown.enter="onEnter"
