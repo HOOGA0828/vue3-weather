@@ -2,7 +2,24 @@
   <div class="relative w-full h-full flex font-sans" ref="containerRef">
     
     <!-- 地圖區塊 -->
-    <div class="flex-1 h-full relative overflow-hidden bg-gradient-to-br from-blue-50 to-sky-100 flex items-center justify-center rounded-xl shadow-inner">
+    <div class="flex-1 h-full relative overflow-hidden bg-gradient-to-br from-blue-50 to-sky-100 flex flex-col items-center justify-center rounded-xl shadow-inner">
+      <!-- 搜尋框 - 浮動在最上層 -->
+      <!-- 改用 z-40 確保永遠在按鈕之上 -->
+      <div class="absolute top-6 left-0 right-0 z-40 px-4">
+        <CitySearch @select="handleCitySelect" @active="isSearchActive = $event" />
+      </div>
+
+      <!-- 重設視角按鈕 -->
+      <Transition name="fade">
+        <button 
+          v-if="(isPreciseLocation || hasZoomedIn) && !selectedPref && !isSearchActive" 
+          @click="resetMap" 
+          class="absolute top-24 left-6 z-30 bg-white/90 backdrop-blur shadow-md hover:shadow-lg text-slate-700 hover:text-blue-600 font-bold px-4 py-2 rounded-lg border border-slate-200/50 flex items-center gap-2 transition-all transform hover:-translate-y-0.5"
+        >
+          <span class="text-xl leading-none">←</span> 返回全國地圖
+        </button>
+      </Transition>
+
       <div v-if="!mapInitialized" class="absolute inset-0 flex flex-col items-center justify-center z-20 bg-white/60 backdrop-blur-md">
         <div class="w-12 h-12 border-4 border-blue-200 border-t-blue-600 rounded-full animate-spin mb-4 shadow-sm"></div>
         <p class="text-slate-800 font-bold tracking-wide">正在載入日本氣象資料...</p>
@@ -138,6 +155,9 @@
 import { ref, onMounted, reactive, computed, watch } from 'vue';
 import * as d3 from 'd3';
 import { useWeatherStore } from '../stores/weatherStore';
+import CitySearch from './CitySearch.vue';
+import { GeoLocation } from '../services/geocodingService';
+import { fetchWeatherByCoords } from '../services/weatherService';
 
 const props = defineProps<{
   displayMode: 'temp' | 'pop'
@@ -150,8 +170,20 @@ const svgRef = ref<SVGSVGElement | null>(null);
 const mapInitialized = ref(false);
 const currentZoomK = ref(1); // 追蹤目前的縮放比例，用來調整文字大小
 
-// 側邊欄選擇的都道府縣
+// 側邊欄選擇的都道府縣，或自動完成搜尋的精確地點
 const selectedPref = ref(decodeURIComponent(window.location.pathname.slice(1)) || '');
+const isPreciseLocation = ref(false); // 標記是否為搜尋來的精確座標點
+const hasZoomedIn = ref(false); // 標記是否已經放大地圖 (包含點擊都道府縣)
+const isSearchActive = ref(false);
+
+// 儲存精確搜尋點的座標與名稱，供畫 Tooltip 標籤使用
+const preciseLocationData = ref<{x: number, y: number, name: string} | null>(null);
+
+let globalZoom: d3.ZoomBehavior<SVGSVGElement, unknown> | null = null;
+let baseProjection: d3.GeoProjection | null = null;
+let gContent: d3.Selection<SVGGElement, unknown, null, undefined> | null = null;
+let gMarker: d3.Selection<SVGGElement, unknown, null, undefined> | null = null;
+let currentPathGenerator: d3.GeoPath<any, d3.GeoPermissibleObjects> | null = null;
 
 // 當 selectedPref 改變時，更新網址列
 watch(selectedPref, (newPref) => {
@@ -159,14 +191,194 @@ watch(selectedPref, (newPref) => {
   if (decodeURIComponent(window.location.pathname) !== newPath) {
     window.history.pushState({ pref: newPref }, '', newPath);
   }
+
+  // 如果清空選取 (代表關閉 Modal)
+  if (!newPref) {
+    // 之前是移除圖釘，現在改為：不移除圖釘，反而要在圖釘旁邊加上天氣資訊文字
+    if (gMarker && isPreciseLocation.value && preciseLocationData.value) {
+      // 確保沒有重複的 labels
+      gMarker.selectAll('.marker-label').remove();
+
+      const scale = 15; // 對齊 Zoom In 的比例
+      const loc = preciseLocationData.value;
+      const current = weatherStore.currentData[loc.name];
+
+      if (current) {
+        const labelGroup = gMarker.append('g')
+          .attr('class', 'marker-label')
+          .attr('transform', `translate(${loc.x}, ${loc.y}) scale(${1 / scale})`)
+          .style('opacity', 0); // 準備動畫淡入
+
+        // 背景方塊 (模擬 tooltip 外觀)
+        labelGroup.append('rect')
+          .attr('x', 12)
+          .attr('y', -35)
+          .attr('width', 100)
+          .attr('height', 45)
+          .attr('rx', 6)
+          .attr('fill', 'rgba(255, 255, 255, 0.95)')
+          .attr('stroke', '#e2e8f0')
+          .attr('stroke-width', 1)
+          .style('filter', 'drop-shadow(0 4px 6px rgba(0,0,0,0.1))');
+
+        // 地標名稱
+        labelGroup.append('text')
+          .attr('x', 20)
+          .attr('y', -20)
+          .text(loc.name)
+          .attr('font-size', '14px')
+          .attr('font-weight', 'bold')
+          .attr('fill', '#1e293b');
+
+        // 氣溫與降雨機率
+        const tempText = current.temp !== null ? `${current.temp}°` : '--';
+        const popText = current.pop !== null ? `${current.pop}%` : '--';
+        
+        labelGroup.append('text')
+          .attr('x', 20)
+          .attr('y', -1)
+          .text(`🌡️ ${tempText}  ☔ ${popText}`)
+          .attr('font-size', '12px')
+          .attr('fill', '#475569');
+
+        labelGroup.transition().duration(400).style('opacity', 1);
+      }
+    }
+    
+    // 取消任何 hover filter
+    if (gContent) {
+      gContent.selectAll('.prefecture').style('filter', 'none');
+    }
+  } else {
+    // 如果打開 Modal，就把圖釘旁邊的提示文字暫時藏起來，避免畫面太亂
+    if (gMarker) {
+      gMarker.selectAll('.marker-label').remove();
+    }
+  }
 });
 
 // 監聽上一頁/下一頁事件 (popstate) 以同步 URL 到內部狀態
 onMounted(() => {
   window.addEventListener('popstate', () => {
     selectedPref.value = decodeURIComponent(window.location.pathname.slice(1)) || '';
+    isPreciseLocation.value = false;
+    hasZoomedIn.value = false; // reset zoom tracking as well
   });
 });
+
+// 處理自動完成選單的選擇
+const handleCitySelect = async (location: GeoLocation) => {
+  const customLocationName = `${location.admin1 || ''} ${location.name}`.trim();
+  
+  // 1. 標示為精確地點與己放大，但先不要打開 Modal (selectedPref.value = customLocationName 會觸發 Modal)
+  isPreciseLocation.value = true;
+  hasZoomedIn.value = true;
+  
+  // 準備資料
+  const dataPromise = (async () => {
+    // 2. 獲取該地點的精確天氣預報
+    const weeklyWeather = await fetchWeatherByCoords(location.latitude, location.longitude);
+    
+    // 3. 獲取即時天氣 (利用 Open-Meteo Current API)
+    const currentUrl = `https://api.open-meteo.com/v1/forecast?latitude=${location.latitude}&longitude=${location.longitude}&current=temperature_2m,precipitation&timezone=Asia%2FTokyo`;
+    let currentTemp = null;
+    let currentPop = null;
+    try {
+      const res = await fetch(currentUrl);
+      const data = await res.json();
+      currentTemp = Math.round(data.current.temperature_2m);
+      currentPop = data.current.precipitation > 0 ? Math.round(data.current.precipitation * 10) : 0;
+    } catch (e) {
+      console.error('Failed to fetch precise current weather', e);
+    }
+    
+    // 4. 動態插回 data object 中
+    weatherStore.weatherData[customLocationName] = weeklyWeather;
+    weatherStore.currentData[customLocationName] = {
+      temp: currentTemp,
+      pop: currentPop
+    };
+  })();
+
+  // 5. 地圖動態 Zoom in 與放置 Marker
+  if (baseProjection && globalZoom && svgRef.value && gMarker) {
+    const [px, py] = baseProjection([location.longitude, location.latitude])!;
+    
+    preciseLocationData.value = { x: px, y: py, name: customLocationName };
+
+    // 平滑縮放
+    const scale = 15; // 特定的 Zoom in 比例
+    const width = containerRef.value?.clientWidth || 800;
+    const height = containerRef.value?.clientHeight || 800;
+    const translate = [width / 2 - scale * px, height / 2 - scale * py];
+
+    const svg = d3.select(svgRef.value);
+    svg.transition().duration(1200).call(
+      globalZoom.transform as any,
+      d3.zoomIdentity.translate(translate[0], translate[1]).scale(scale)
+    );
+
+    // 清空先前的標記
+    gMarker.selectAll('*').remove();
+
+    // 動態波紋背景
+    const pulse = gMarker.append('circle')
+      .attr('cx', px)
+      .attr('cy', py)
+      .attr('r', 10 / scale)
+      .attr('fill', '#ef4444')
+      .attr('opacity', 0.8);
+      
+    const pulseLoop = () => {
+      pulse.attr('r', 10 / scale)
+           .attr('opacity', 0.8)
+           .transition()
+           .duration(1500)
+           .attr('r', 60 / scale)
+           .attr('opacity', 0)
+           .on('end', pulseLoop);
+    };
+    pulseLoop();
+
+    // 繪製地圖圖釘 (Pin) - 使用精準無變形的標準水滴 SVG
+    gMarker.append('path')
+      .attr('d', 'M 0 0 C -4 -5 -8 -10 -8 -14 A 8 8 0 1 1 8 -14 C 8 -10 4 -5 0 0 Z')
+      .attr('transform', `translate(${px}, ${py}) scale(${1.2 / scale})`)
+      .attr('fill', '#ef4444') // Tailwind rose-500
+      .attr('stroke', '#ffffff')
+      .attr('stroke-width', 1.5)
+      .style('filter', 'drop-shadow(0px 2px 2px rgba(0,0,0,0.4))');
+
+    // 確保資料載入完成，並等待動畫結束 (1200ms) 後，才開啟 Modal
+    await dataPromise;
+    setTimeout(() => {
+        selectedPref.value = customLocationName;
+    }, 1200);
+
+  } else {
+    // 退路：如果地圖還沒準備好，至少照常開 Modal
+    await dataPromise;
+    selectedPref.value = customLocationName;
+  }
+};
+
+const resetMap = () => {
+  isPreciseLocation.value = false;
+  hasZoomedIn.value = false;
+  selectedPref.value = '';
+  preciseLocationData.value = null;
+  
+  if (globalZoom && svgRef.value && gMarker) {
+    // 移除地標與文字標籤
+    gMarker.selectAll('*').transition().duration(500).style('opacity', 0).remove();
+    
+    // 地圖視角歸位
+    d3.select(svgRef.value).transition().duration(1000).call(
+      globalZoom.transform as any,
+      d3.zoomIdentity
+    );
+  }
+};
 
 // Tooltip 狀態
 const tooltip = reactive({
@@ -225,9 +437,6 @@ const getPrefectureColor = (prefName: string) => {
   return '#f1f5f9';
 };
 
-let gContent: d3.Selection<SVGGElement, unknown, null, undefined> | null = null;
-let currentPathGenerator: d3.GeoPath<any, d3.GeoPermissibleObjects> | null = null;
-
 const updateLabelsAndColors = () => {
   if (!gContent || !weatherStore.hasFetchedAll) return;
   
@@ -266,9 +475,10 @@ const renderMap = async () => {
 
   const g = svg.append('g');
   gContent = g;
+  gMarker = g.append('g').attr('class', 'marker-layer'); // 增加 Marker 圖層
 
   const zoom = d3.zoom<SVGSVGElement, unknown>()
-    .scaleExtent([0.5, 8])
+    .scaleExtent([0.5, 30])
     .on('zoom', (event) => {
       // 縮放地圖
       g.attr('transform', event.transform);
@@ -289,6 +499,8 @@ const renderMap = async () => {
       g.selectAll('.pref-label')
         .attr('font-size', `${Math.max(1.2, adjustedPrefSize)}px`)
         .attr('stroke-width', `${2.5 / event.transform.k}px`);
+
+      // 保持 Marker 尺寸穩定縮放 (可選)
     });
 
   svg.call(zoom);
@@ -301,9 +513,10 @@ const renderMap = async () => {
       .scale(height * 2.5)
       .translate([width / 2, height / 2]);
 
+    baseProjection = projection;
     currentPathGenerator = d3.geoPath().projection(projection);
 
-    g.selectAll('.prefecture')
+    gContent.selectAll('.prefecture')
       .data(geojsonData.features)
       .enter()
       .append('path')
@@ -330,14 +543,50 @@ const renderMap = async () => {
       })
       .on('click', function(event, d: any) {
         const prefName = d.properties.nam_ja;
-        // 打開 Modal 顯示該區塊
-        selectedPref.value = prefName;
+        
+        // 如果原本是精確定位的圖釘，就清除圖釘並重置資料，但如果原本就有 Zoom In 則無妨
+        if (isPreciseLocation.value && gMarker) {
+            gMarker.selectAll('*').transition().duration(300).style('opacity', 0).remove();
+            isPreciseLocation.value = false;
+            preciseLocationData.value = null;
+        }
+
+        // 地圖動態 Zoom in 到該都道府縣
+        if (globalZoom && svgRef.value && currentPathGenerator) {
+          hasZoomedIn.value = true;
+          
+          // 取得該區塊的中心點與邊界
+          const bounds = currentPathGenerator.bounds(d);
+          const dx = bounds[1][0] - bounds[0][0];
+          const dy = bounds[1][1] - bounds[0][1];
+          const x = (bounds[0][0] + bounds[1][0]) / 2;
+          const y = (bounds[0][1] + bounds[1][1]) / 2;
+          
+          const width = containerRef.value?.clientWidth || 800;
+          const height = containerRef.value?.clientHeight || 800;
+          
+          // 計算適當的縮放比例 (留點邊距，並且限制不要太大或太小)
+          const scale = Math.max(1, Math.min(8, 0.9 / Math.max(dx / width, dy / height)));
+          const translate = [width / 2 - scale * x, height / 2 - scale * y];
+
+          const svg = d3.select(svgRef.value);
+          svg.transition().duration(1000).call(
+            globalZoom.transform as any,
+            d3.zoomIdentity.translate(translate[0], translate[1]).scale(scale)
+          ).on('end', () => {
+             // 動畫跑完後再彈出 Modal
+             selectedPref.value = prefName;
+          });
+        } else {
+             selectedPref.value = prefName;
+        }
+        
         // 取消剛剛加上的 filter 避免閃動
         d3.select(this).style('filter', 'none');
       });
 
     // 建立文字標籤佔位 (氣溫 / 降雨機率)
-    g.selectAll('.weather-label')
+    gContent.selectAll('.weather-label')
       .data(geojsonData.features)
       .enter()
       .append('text')
@@ -364,7 +613,7 @@ const renderMap = async () => {
       .style('letter-spacing', '0.02em');
 
     // 建立都道府縣名稱標籤 (全局顯示)
-    g.selectAll('.pref-label')
+    gContent.selectAll('.pref-label')
       .data(geojsonData.features)
       .enter()
       .append('text')
@@ -391,7 +640,11 @@ const renderMap = async () => {
       .attr('paint-order', 'stroke')
       .attr('pointer-events', 'none');
 
+    // 確保 Marker 圖層在最上層
+    if (gMarker) gMarker.raise();
+
     updateLabelsAndColors();
+    globalZoom = zoom;
     mapInitialized.value = true;
   } catch (error) {
     console.error('Failed to load map data:', error);
@@ -423,5 +676,15 @@ onMounted(async () => {
 .modal-enter-from,
 .modal-leave-to {
   opacity: 0;
+}
+
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.3s ease, transform 0.3s ease;
+}
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+  transform: translateY(-10px);
 }
 </style>

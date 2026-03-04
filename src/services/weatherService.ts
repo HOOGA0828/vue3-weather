@@ -57,7 +57,7 @@ export const PREFECTURE_TO_JMA_AREA: Record<string, string> = {
 };
 
 /**
- * 取得指定都道府縣的未來一週天氣
+ * 取得指定都道府縣的未來一週天氣 (舊版，保留給大地圖用)
  * @param prefName 都道府縣名稱 (如 "東京都")
  */
 export async function fetchWeeklyWeather(prefName: string): Promise<DailyWeather[]> {
@@ -118,6 +118,44 @@ export async function fetchWeeklyWeather(prefName: string): Promise<DailyWeather
 
     } catch (error) {
         console.error('Failed to fetch weather data:', error);
+        return [];
+    }
+}
+
+/**
+ * 透過經緯度取得未來一週天氣 (取代原本靠 AreaCode)
+ * 適用於 Geocoding API 搜尋回來的精確市區町村
+ */
+export async function fetchWeatherByCoords(lat: number, lon: number): Promise<DailyWeather[]> {
+    const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max&timezone=Asia%2FTokyo`;
+
+    try {
+        const res = await fetch(url);
+        const data = await res.json();
+        const daily = data.daily;
+
+        if (!daily) return [];
+
+        const result: DailyWeather[] = [];
+        for (let i = 0; i < daily.time.length; i++) {
+            const dateStr = daily.time[i];
+            const min = daily.temperature_2m_min[i];
+            const max = daily.temperature_2m_max[i];
+            const pop = daily.precipitation_probability_max[i];
+
+            result.push({
+                date: dateStr,
+                pop: pop !== null ? String(pop) : '--',
+                tempMin: min !== null ? String(Math.round(min)) : '--',
+                tempMax: max !== null ? String(Math.round(max)) : '--',
+            });
+        }
+
+        console.log(`[Open-Meteo Weekly for Lat:${lat}, Lon:${lon}]:`, result);
+        return result;
+
+    } catch (error) {
+        console.error('Failed to fetch Open-Meteo weekly geometry data:', error);
         return [];
     }
 }
