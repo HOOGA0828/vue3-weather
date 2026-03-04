@@ -531,8 +531,8 @@ const renderMap = async () => {
       .attr('stroke-width', 0.2)
       .attr('cursor', 'pointer')
       .on('mousemove', function(event, d: any) {
-        // 在不支援 hover 的設備 (如觸控手機) 上不顯示 tooltip
-        if (!window.matchMedia('(hover: hover)').matches) return;
+        // 在寬度 < 960px 的設備上不顯示 tooltip
+        if (window.innerWidth < 960) return;
 
         const prefName = d.properties.nam_ja;
         tooltip.visible = true;
