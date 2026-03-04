@@ -300,17 +300,21 @@ const handleCitySelect = async (location: GeoLocation) => {
     };
   })();
 
-  // 5. 地圖動態 Zoom in 與放置 Marker
-  if (baseProjection && globalZoom && svgRef.value && gMarker) {
-    const [px, py] = baseProjection([location.longitude, location.latitude])!;
-    
-    preciseLocationData.value = { x: px, y: py, name: customLocationName };
+    // 5. 地圖動態 Zoom in 與放置 Marker
+    if (baseProjection && globalZoom && svgRef.value && gMarker) {
+      const [px, py] = baseProjection([location.longitude, location.latitude])!;
+      
+      preciseLocationData.value = { x: px, y: py, name: customLocationName };
 
-    // 平滑縮放
-    const scale = 15; // 特定的 Zoom in 比例
-    const width = containerRef.value?.clientWidth || 800;
-    const height = containerRef.value?.clientHeight || 800;
-    const translate = [width / 2 - scale * px, height / 2 - scale * py];
+      // 平滑縮放
+      const scale = 15; // 特定的 Zoom in 比例
+      
+      // 避免手機鍵盤彈出壓縮導致算出來的 y 中心點偏上，如果高度被過度壓縮 (< 400)，改以 window.innerHeight 來計算
+      const width = containerRef.value?.clientWidth || window.innerWidth;
+      const rawHeight = containerRef.value?.clientHeight || window.innerHeight;
+      const height = rawHeight < 400 && window.innerWidth < 640 ? window.innerHeight : rawHeight;
+
+      const translate = [width / 2 - scale * px, height / 2 - scale * py];
 
     const svg = d3.select(svgRef.value);
     svg.transition().duration(1200).call(
@@ -527,6 +531,9 @@ const renderMap = async () => {
       .attr('stroke-width', 0.2)
       .attr('cursor', 'pointer')
       .on('mousemove', function(event, d: any) {
+        // 在不支援 hover 的設備 (如觸控手機) 上不顯示 tooltip
+        if (!window.matchMedia('(hover: hover)').matches) return;
+
         const prefName = d.properties.nam_ja;
         tooltip.visible = true;
         
@@ -562,8 +569,10 @@ const renderMap = async () => {
           const x = (bounds[0][0] + bounds[1][0]) / 2;
           const y = (bounds[0][1] + bounds[1][1]) / 2;
           
-          const width = containerRef.value?.clientWidth || 800;
-          const height = containerRef.value?.clientHeight || 800;
+          // 避免手機鍵盤彈出壓縮導致算出來的 y 中心點偏上，如果高度被過度壓縮 (< 400)，改以 window.innerHeight 來計算
+          const width = containerRef.value?.clientWidth || window.innerWidth;
+          const rawHeight = containerRef.value?.clientHeight || window.innerHeight;
+          const height = rawHeight < 400 && window.innerWidth < 640 ? window.innerHeight : rawHeight;
           
           // 計算適當的縮放比例 (留點邊距，並且限制不要太大或太小)
           const scale = Math.max(1, Math.min(8, 0.9 / Math.max(dx / width, dy / height)));
