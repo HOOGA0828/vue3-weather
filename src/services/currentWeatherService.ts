@@ -81,23 +81,54 @@ async function fetchCurrentForPref(
     }
 }
 
+interface OpenMeteoCurrentResponse {
+    current?: {
+        temperature_2m?: number | null;
+        precipitation_probability?: number | null;
+    };
+}
+
 /**
- * 平行取得 47 都道府縣的即時天氣
+ * 以單一批次請求取得 47 都道府縣的即時天氣。
+ * Open-Meteo 支援以逗號分隔多組經緯度，回傳順序與輸入順序一致。
  */
 export async function fetchAllCurrentWeather(): Promise<Record<string, CurrentWeather>> {
     const entries = Object.entries(PREFECTURE_COORDS);
-    const results = await Promise.allSettled(
-        entries.map(([prefName, coords]) => fetchCurrentForPref(prefName, coords))
-    );
+    const latitudes = entries.map(([, coords]) => coords.lat).join(',');
+    const longitudes = entries.map(([, coords]) => coords.lon).join(',');
+    const url =
+        `https://api.open-meteo.com/v1/forecast` +
+        `?latitude=${latitudes}&longitude=${longitudes}` +
+        `&current=temperature_2m,precipitation_probability` +
+        `&timezone=Asia%2FTokyo`;
 
-    const record: Record<string, CurrentWeather> = {};
-    results.forEach((result, i) => {
-        const prefName = entries[i][0];
-        record[prefName] =
-            result.status === 'fulfilled'
+    try {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+        const payload = await res.json() as OpenMeteoCurrentResponse[] | OpenMeteoCurrentResponse;
+        const results = Array.isArray(payload) ? payload : [payload];
+
+        return Object.fromEntries(entries.map(([prefName], index) => {
+            const current = results[index]?.current;
+            return [prefName, {
+                temp: current?.temperature_2m ?? null,
+                pop: current?.precipitation_probability ?? null,
+            }];
+        }));
+    } catch (error) {
+        console.error('[Open-Meteo] Batch request failed, falling back to individual requests:', error);
+
+        // 批次服務異常時保留原本的逐筆退路，避免整張地圖完全沒有資料。
+        const results = await Promise.allSettled(
+            entries.map(([prefName, coords]) => fetchCurrentForPref(prefName, coords))
+        );
+
+        return Object.fromEntries(entries.map(([prefName], index) => {
+            const result = results[index];
+            return [prefName, result.status === 'fulfilled'
                 ? result.value
-                : { temp: null, pop: null };
-    });
-
-    return record;
+                : { temp: null, pop: null }];
+        }));
+    }
 }

@@ -140,7 +140,12 @@
               </div>
             </div>
             
-            <div v-if="!(weatherStore.weatherData[selectedPref] && weatherStore.weatherData[selectedPref].length > 0)" class="flex flex-col items-center justify-center text-slate-400 py-16 bg-white rounded-3xl border border-dashed border-slate-200">
+            <div v-if="weatherStore.weatherLoading[selectedPref]" class="flex flex-col items-center justify-center text-slate-500 py-16 bg-white rounded-3xl border border-slate-200">
+              <div class="w-9 h-9 border-4 border-blue-100 border-t-blue-500 rounded-full animate-spin mb-4"></div>
+              <p class="font-medium text-lg">正在載入此地區的詳細預報...</p>
+            </div>
+
+            <div v-else-if="!(weatherStore.weatherData[selectedPref] && weatherStore.weatherData[selectedPref].length > 0)" class="flex flex-col items-center justify-center text-slate-400 py-16 bg-white rounded-3xl border border-dashed border-slate-200">
               <span class="text-5xl mb-4 opacity-50 grayscale filter">☁️</span>
               <p class="font-medium text-lg">該地區目前無法取得天氣資訊</p>
             </div>
@@ -442,7 +447,7 @@ const getPrefectureColor = (prefName: string) => {
 };
 
 const updateLabelsAndColors = () => {
-  if (!gContent || !weatherStore.hasFetchedAll) return;
+  if (!gContent) return;
   
   // 更新文字內容與顏色（改用 Open-Meteo 即時資料）
   gContent.selectAll('.weather-label')
@@ -550,6 +555,9 @@ const renderMap = async () => {
       })
       .on('click', function(event, d: any) {
         const prefName = d.properties.nam_ja;
+
+        // 詳細週預報不阻塞地圖；點擊時若尚未載入就提高優先順序立即抓取。
+        void weatherStore.fetchWeatherForPrefecture(prefName);
         
         // 如果原本是精確定位的圖釘，就清除圖釘並重置資料，但如果原本就有 Zoom In 則無妨
         if (isPreciseLocation.value && gMarker) {
@@ -654,19 +662,25 @@ const renderMap = async () => {
 
     updateLabelsAndColors();
     globalZoom = zoom;
-    mapInitialized.value = true;
   } catch (error) {
     console.error('Failed to load map data:', error);
   }
 };
 
 onMounted(async () => {
-  // 平行發出兩個請求：JMA 週預報 + Open-Meteo 即時天氣
+  // 首屏只等待地圖與代表城市即時資料；詳細週預報不再阻塞畫面。
   await Promise.all([
-    weatherStore.fetchAllWeather(),
+    renderMap(),
     weatherStore.fetchAllCurrent(),
   ]);
-  await renderMap();
+
+  updateLabelsAndColors();
+  mapInitialized.value = true;
+
+  // 使用者已可操作地圖後，再以受限併發於背景補齊 47 都道府縣週預報。
+  window.setTimeout(() => {
+    void weatherStore.fetchAllWeather();
+  }, 0);
 });
 </script>
 
