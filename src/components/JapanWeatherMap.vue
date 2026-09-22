@@ -20,12 +20,41 @@
         </button>
       </Transition>
 
-      <div v-if="!mapInitialized" class="absolute inset-0 flex flex-col items-center justify-center z-20 bg-white/60 backdrop-blur-md">
+      <div v-if="!mapInitialized && !mapLoadError" class="absolute inset-0 flex flex-col items-center justify-center z-20 bg-white/60 backdrop-blur-md">
         <div class="w-12 h-12 border-4 border-blue-200 border-t-blue-600 rounded-full animate-spin mb-4 shadow-sm"></div>
         <p class="text-slate-800 font-bold tracking-wide">正在載入日本氣象資料...</p>
       </div>
+
+      <div v-else-if="mapLoadError" class="absolute inset-0 flex flex-col items-center justify-center z-20 bg-white/80 px-6 text-center">
+        <span class="text-5xl mb-4">🗾</span>
+        <p class="text-slate-800 font-bold text-lg">日本地圖載入失敗</p>
+        <p class="text-slate-500 mt-2 mb-5">{{ mapLoadError }}</p>
+        <button
+          @click="initializeMap"
+          class="rounded-xl bg-blue-600 px-5 py-2.5 font-bold text-white shadow hover:bg-blue-700 transition-colors"
+        >
+          重新載入
+        </button>
+      </div>
+
+      <Transition name="fade">
+        <div v-if="mapInitialized && weatherStore.isCurrentLoading" class="absolute bottom-4 right-4 z-20 flex items-center gap-2 rounded-full bg-white/90 px-3 py-2 text-xs font-bold text-slate-600 shadow-md border border-slate-200">
+          <span class="w-3.5 h-3.5 border-2 border-blue-100 border-t-blue-500 rounded-full animate-spin"></span>
+          正在更新主要城市天氣...
+        </div>
+      </Transition>
       
       <svg ref="svgRef" class="w-full h-full cursor-grab active:cursor-grabbing transition-opacity duration-700" :style="{ opacity: mapInitialized ? 1 : 0 }"></svg>
+
+      <a
+        v-if="mapInitialized"
+        href="https://www.gsi.go.jp/kankyochiri/gm_jpn.html"
+        target="_blank"
+        rel="noopener noreferrer"
+        class="absolute bottom-2 left-3 z-10 text-[10px] text-slate-500/80 hover:text-blue-600"
+      >
+        地圖資料：地球地圖日本
+      </a>
       
       <!-- Hover Tooltip -->
       <div 
@@ -159,6 +188,7 @@
 <script setup lang="ts">
 import { ref, onMounted, reactive, computed, watch } from 'vue';
 import * as d3 from 'd3';
+import { feature as topojsonFeature } from 'topojson-client';
 import { useWeatherStore } from '../stores/weatherStore';
 import CitySearch from './CitySearch.vue';
 import { GeoLocation } from '../services/geocodingService';
@@ -173,6 +203,7 @@ const weatherStore = useWeatherStore();
 const containerRef = ref<HTMLElement | null>(null);
 const svgRef = ref<SVGSVGElement | null>(null);
 const mapInitialized = ref(false);
+const mapLoadError = ref('');
 const currentZoomK = ref(1); // 追蹤目前的縮放比例，用來調整文字大小
 
 // 側邊欄選擇的都道府縣，或自動完成搜尋的精確地點
@@ -482,6 +513,9 @@ const renderMap = async () => {
     .attr('width', width)
     .attr('height', height);
 
+  // 重試時先清除前一次未完成的 SVG，避免重複圖層與事件。
+  svg.selectAll('*').remove();
+
   const g = svg.append('g');
   gContent = g;
   gMarker = g.append('g').attr('class', 'marker-layer'); // 增加 Marker 圖層
@@ -514,8 +548,19 @@ const renderMap = async () => {
 
   svg.call(zoom);
 
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), 8000);
+
   try {
-    const geojsonData = await d3.json('https://raw.githubusercontent.com/dataofjapan/land/master/japan.geojson') as any;
+    const mapUrl = `${import.meta.env.BASE_URL}japan.topojson`;
+    const response = await fetch(mapUrl, { signal: controller.signal });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+    const topology = await response.json() as any;
+    const topologyObject = topology.objects?.japan ?? Object.values(topology.objects ?? {})[0];
+    if (!topologyObject) throw new Error('地圖資料格式不正確');
+
+    const geojsonData = topojsonFeature(topology, topologyObject as any) as any;
 
     const projection = d3.geoMercator()
       .center([137.0, 38.2]) 
@@ -662,25 +707,35 @@ const renderMap = async () => {
 
     updateLabelsAndColors();
     globalZoom = zoom;
-  } catch (error) {
-    console.error('Failed to load map data:', error);
+  } finally {
+    window.clearTimeout(timeoutId);
   }
 };
 
-onMounted(async () => {
-  // 首屏只等待地圖與代表城市即時資料；詳細週預報不再阻塞畫面。
-  await Promise.all([
-    renderMap(),
-    weatherStore.fetchAllCurrent(),
-  ]);
+const initializeMap = async () => {
+  mapInitialized.value = false;
+  mapLoadError.value = '';
 
-  updateLabelsAndColors();
-  mapInitialized.value = true;
+  try {
+    await renderMap();
+    mapInitialized.value = true;
 
-  // 使用者已可操作地圖後，再以受限併發於背景補齊 47 都道府縣週預報。
-  window.setTimeout(() => {
-    void weatherStore.fetchAllWeather();
-  }, 0);
+    // 地圖可操作後，再以受限併發於背景補齊詳細週預報。
+    window.setTimeout(() => {
+      void weatherStore.fetchAllWeather();
+    }, 0);
+  } catch (error) {
+    console.error('Failed to load map data:', error);
+    mapLoadError.value = error instanceof DOMException && error.name === 'AbortError'
+      ? '載入時間過長，請檢查網路後重試。'
+      : '請稍後再試，或重新整理頁面。';
+  }
+};
+
+onMounted(() => {
+  // 地圖與即時天氣獨立載入；任何天氣 API 延遲都不再阻塞地圖首屏。
+  void initializeMap();
+  void weatherStore.fetchAllCurrent().then(updateLabelsAndColors);
 });
 </script>
 

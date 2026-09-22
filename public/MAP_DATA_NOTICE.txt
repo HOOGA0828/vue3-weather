@@ -1,0 +1,6 @@
+Japan boundary data source: Global Map Japan (Geospatial Information Authority of Japan).
+Converted and distributed by the dataofjapan/land project:
+https://github.com/dataofjapan/land
+
+The bundled japan.topojson file is a local copy of:
+https://raw.githubusercontent.com/dataofjapan/land/master/japan.topojson

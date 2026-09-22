@@ -3,6 +3,22 @@ export interface CurrentWeather {
     pop: number | null;
 }
 
+const CURRENT_REQUEST_TIMEOUT_MS = 6000;
+const FALLBACK_CONCURRENCY = 6;
+
+async function fetchJsonWithTimeout<T>(url: string, timeoutMs = CURRENT_REQUEST_TIMEOUT_MS): Promise<T> {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+        const response = await fetch(url, { signal: controller.signal });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return await response.json() as T;
+    } finally {
+        clearTimeout(timeoutId);
+    }
+}
+
 // 47 都道府縣代表城市的經緯度（縣廳所在地）
 export const PREFECTURE_COORDS: Record<string, { lat: number; lon: number }> = {
     '北海道': { lat: 43.064, lon: 141.347 },
@@ -68,8 +84,7 @@ async function fetchCurrentForPref(
         `&timezone=Asia%2FTokyo`;
 
     try {
-        const res = await fetch(url);
-        const data = await res.json();
+        const data = await fetchJsonWithTimeout<OpenMeteoCurrentResponse>(url);
         const current = data.current;
         return {
             temp: current?.temperature_2m ?? null,
@@ -103,10 +118,7 @@ export async function fetchAllCurrentWeather(): Promise<Record<string, CurrentWe
         `&timezone=Asia%2FTokyo`;
 
     try {
-        const res = await fetch(url);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-        const payload = await res.json() as OpenMeteoCurrentResponse[] | OpenMeteoCurrentResponse;
+        const payload = await fetchJsonWithTimeout<OpenMeteoCurrentResponse[] | OpenMeteoCurrentResponse>(url);
         const results = Array.isArray(payload) ? payload : [payload];
 
         return Object.fromEntries(entries.map(([prefName], index) => {
@@ -119,16 +131,27 @@ export async function fetchAllCurrentWeather(): Promise<Record<string, CurrentWe
     } catch (error) {
         console.error('[Open-Meteo] Batch request failed, falling back to individual requests:', error);
 
-        // 批次服務異常時保留原本的逐筆退路，避免整張地圖完全沒有資料。
-        const results = await Promise.allSettled(
-            entries.map(([prefName, coords]) => fetchCurrentForPref(prefName, coords))
+        // 批次服務異常時保留逐筆退路，但限制併發數，避免瞬間送出 47 個請求。
+        const results = new Array<CurrentWeather>(entries.length);
+        let nextIndex = 0;
+
+        const worker = async () => {
+            while (nextIndex < entries.length) {
+                const index = nextIndex++;
+                const [prefName, coords] = entries[index];
+                results[index] = await fetchCurrentForPref(prefName, coords);
+            }
+        };
+
+        await Promise.all(
+            Array.from(
+                { length: Math.min(FALLBACK_CONCURRENCY, entries.length) },
+                () => worker()
+            )
         );
 
-        return Object.fromEntries(entries.map(([prefName], index) => {
-            const result = results[index];
-            return [prefName, result.status === 'fulfilled'
-                ? result.value
-                : { temp: null, pop: null }];
-        }));
+        return Object.fromEntries(
+            entries.map(([prefName], index) => [prefName, results[index]])
+        );
     }
 }
